@@ -1,11 +1,13 @@
-// Service de calcul d'itinéraires via Geoapify
-// Documentation : https://apidocs.geoapify.com/docs/routing/
+// Service de calcul d'itinéraires via Geoapify (via proxy serverless)
 
-const GEOAPIFY_URL = 'https://api.geoapify.com/v1/routing'
+// En production (Vercel), on utilise /api/geoapify
+// En développement (Vite), le proxy est configuré dans vite.config.js
+const API_BASE = import.meta.env.DEV 
+  ? 'https://api.geoapify.com/v1'   // dev : appel direct
+  : '/api/geoapify'                  // prod : via serverless
 
 const API_KEY = import.meta.env.VITE_GEOAPIFY_API_KEY
 
-// Profils Geoapify
 export const PROFILS = {
   voiture: { geo: 'drive',   emoji: '🚗', label: 'Voiture / Taxi' },
   marche:  { geo: 'walk',    emoji: '🚶', label: 'Marche' },
@@ -13,30 +15,36 @@ export const PROFILS = {
 }
 
 /**
- * Calcule un itinéraire entre deux points via Geoapify
+ * Calcule un itinéraire entre deux points
  */
 export async function calculerItineraire(depart, arrivee, profil = 'voiture') {
-  if (!API_KEY) {
-    throw new Error('Clé API Geoapify manquante. Vérifiez votre fichier .env')
-  }
-
   const profilGeo = PROFILS[profil]?.geo || 'drive'
-
-  // Geoapify attend : waypoints=lat1,lng1|lat2,lng2
   const waypoints = `${depart.lat},${depart.lng}|${arrivee.lat},${arrivee.lng}`
 
-  const params = new URLSearchParams({
-    waypoints: waypoints,
-    mode: profilGeo,
-    apiKey: API_KEY,
-  })
+  let url
+
+  if (import.meta.env.DEV) {
+    // Développement : appel direct
+    if (!API_KEY) throw new Error('Clé API Geoapify manquante')
+    const params = new URLSearchParams({
+      waypoints,
+      mode: profilGeo,
+      apiKey: API_KEY,
+    })
+    url = `${API_BASE}/routing?${params}`
+  } else {
+    // Production : via proxy serverless
+    const params = new URLSearchParams({
+      path: 'routing',
+      waypoints,
+      mode: profilGeo,
+    })
+    url = `${API_BASE}?${params}`
+  }
 
   try {
-    const response = await fetch(`${GEOAPIFY_URL}?${params}`)
-
+    const response = await fetch(url)
     if (!response.ok) {
-      const errorText = await response.text()
-      console.error('Erreur Geoapify:', errorText)
       throw new Error(`Erreur API : ${response.status}`)
     }
 
@@ -48,14 +56,12 @@ export async function calculerItineraire(depart, arrivee, profil = 'voiture') {
 
     const feature = data.features[0]
     const props = feature.properties
-
-    // Geoapify retourne la géométrie en [lng, lat], on inverse pour Leaflet
     const geometry = feature.geometry.coordinates[0].map(([lng, lat]) => [lat, lng])
 
     return {
       profil,
-      distance: props.distance,          // en mètres
-      duree: props.time,                 // en secondes
+      distance: props.distance,
+      duree: props.time,
       geometry,
     }
   } catch (error) {
@@ -64,24 +70,14 @@ export async function calculerItineraire(depart, arrivee, profil = 'voiture') {
   }
 }
 
-/**
- * Calcule les 3 profils en parallèle
- */
 export async function calculerTousLesItineraires(depart, arrivee) {
   const profils = ['voiture', 'marche', 'velo']
-
   const resultats = await Promise.allSettled(
     profils.map((p) => calculerItineraire(depart, arrivee, p))
   )
-
-  return resultats.map((r, i) => {
-    if (r.status === 'fulfilled') {
-      return r.value
-    } else {
-      console.warn(`Échec du profil ${profils[i]}:`, r.reason)
-      return { profil: profils[i], erreur: true }
-    }
-  })
+  return resultats.map((r, i) =>
+    r.status === 'fulfilled' ? r.value : { profil: profils[i], erreur: true }
+  )
 }
 
 // ---------- Formatage ----------
@@ -101,13 +97,9 @@ export function formaterDistance(metres) {
 
 export function estimerPrix(profil, distanceMetres) {
   const km = distanceMetres / 1000
-
   switch (profil) {
-    case 'voiture':
-      return Math.max(1000, Math.round(km * 200))
-    case 'moto':
-      return Math.max(200, Math.round(km * 100))
-    default:
-      return 0
+    case 'voiture': return Math.max(1000, Math.round(km * 200))
+    case 'moto':    return Math.max(200, Math.round(km * 100))
+    default:        return 0
   }
 }
